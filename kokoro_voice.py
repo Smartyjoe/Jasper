@@ -1,11 +1,15 @@
 import json
+import os
 import subprocess
+import time
 import wave
+from typing import Optional, Tuple
 import numpy as np
 
 
 class KokoroVoiceError(Exception):
     """Raised when TTS generation or playback fails."""
+
 
 class KokoroVoice:
     KOKORO_PYTHON = r"C:\Users\USER\kokoro-demo\venv\Scripts\python.exe"
@@ -17,37 +21,39 @@ class KokoroVoice:
     def __init__(self, voice: str = DEFAULT_VOICE, speed: float = 1.0):
         """
         Initialize Kokoro voice TTS engine.
-        
+
         Args:
             voice: The voice to use (e.g., "am_fenrir", "af_heart").
             speed: Speech speed multiplier (1.0 = normal speed).
         """
         self.voice = voice
         self.speed = speed
+        self._is_playing = False
 
-    def speak(self, text: str) -> None:
+    def synthesize(self, text: str, output_wav: Optional[str] = None) -> Tuple[str, float]:
         """
-        Generate speech for `text` and play it to the default audio device.
-        Blocks until playback is complete.
-        
+        Synthesize `text` to WAV file without playing audio.
+
         Args:
-            text: The text to convert to speech.
-            
-        Raises:
-            KokoroVoiceError: On generation or playback failure.
+            text: Text to synthesize.
+            output_wav: Path to output WAV file (defaults to self.OUTPUT_WAV).
+
+        Returns:
+            Tuple of (output_wav_path, generation_time_seconds).
         """
+        target_wav = output_wav or self.OUTPUT_WAV
+        gen_start = time.monotonic()
+
         try:
-            # Prepare arguments for the Kokoro generation script
             args_json = json.dumps({
-                "model": self.KOKORO_DIR + "\\kokoro-v1.0.onnx",
-                "voices": self.KOKORO_DIR + "\\voices-v1.0.bin",
+                "model": os.path.join(self.KOKORO_DIR, "kokoro-v1.0.onnx"),
+                "voices": os.path.join(self.KOKORO_DIR, "voices-v1.0.bin"),
                 "text": text,
                 "voice": self.voice,
                 "speed": self.speed,
-                "output": self.OUTPUT_WAV,
+                "output": target_wav,
             })
-            
-            # Run the generation script in a subprocess
+
             result = subprocess.run(
                 [self.KOKORO_PYTHON, self.GEN_SCRIPT, args_json],
                 capture_output=True,
@@ -55,11 +61,14 @@ class KokoroVoice:
                 encoding="utf-8",
                 timeout=20,
             )
-            
+
             if result.returncode != 0:
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
                 raise KokoroVoiceError(f"Kokoro generation failed: {error_msg}")
-                
+
+            gen_duration = time.monotonic() - gen_start
+            return target_wav, round(gen_duration, 3)
+
         except subprocess.TimeoutExpired:
             raise KokoroVoiceError("Kokoro timed out")
         except FileNotFoundError:
@@ -67,34 +76,77 @@ class KokoroVoice:
         except Exception as exc:
             raise KokoroVoiceError(f"Kokoro generation error: {exc}")
 
-        # Playback in the main process (after generation)
+    def play_wav(self, wav_path: Optional[str] = None) -> float:
+        """
+        Play audio file from `wav_path`. Blocks until playback is complete.
+
+        Args:
+            wav_path: Path to WAV file to play (defaults to self.OUTPUT_WAV).
+
+        Returns:
+            Playback duration in seconds.
+        """
+        target_wav = wav_path or self.OUTPUT_WAV
+        play_start = time.monotonic()
+
         try:
             import sounddevice as sd
-            
-            # Read WAV using stdlib wave module
-            with wave.open(self.OUTPUT_WAV, 'rb') as wav_file:
+
+            with wave.open(target_wav, 'rb') as wav_file:
                 n_channels = wav_file.getnchannels()
                 sample_width = wav_file.getsampwidth()
                 sample_rate = wav_file.getframerate()
                 n_frames = wav_file.getnframes()
-                
+
                 raw_data = wav_file.readframes(n_frames)
-                
-                # Convert to float32 numpy array
+
                 if sample_width == 2:
                     dtype = np.int16
                 elif sample_width == 4:
                     dtype = np.int32
                 else:
                     raise KokoroVoiceError(f"Unsupported sample width: {sample_width}")
-                
-                data = np.frombuffer(raw_data, dtype=dtype).astype(np.float32) / 32768.0 if sample_width == 2 else np.frombuffer(raw_data, dtype=dtype).astype(np.float32) / np.iinfo(dtype).max
-                
+
+                if sample_width == 2:
+                    data = np.frombuffer(raw_data, dtype=dtype).astype(np.float32) / 32768.0
+                else:
+                    data = np.frombuffer(raw_data, dtype=dtype).astype(np.float32) / np.iinfo(dtype).max
+
                 if n_channels == 2:
                     data = data.reshape(-1, 2)
-            
+
+            self._is_playing = True
             sd.play(data, sample_rate)
             sd.wait()
-            
+            self._is_playing = False
+
+            play_duration = time.monotonic() - play_start
+            return round(play_duration, 3)
+
         except Exception as exc:
+            self._is_playing = False
             raise KokoroVoiceError(f"Kokoro playback failed: {exc}")
+
+    def stop_playback(self) -> None:
+        """Stop any ongoing sounddevice audio playback immediately."""
+        try:
+            import sounddevice as sd
+            sd.stop()
+            self._is_playing = False
+        except Exception:
+            pass
+
+    @property
+    def is_playing(self) -> bool:
+        return self._is_playing
+
+    def speak(self, text: str) -> Tuple[float, float]:
+        """
+        Generate speech and play it sequentially.
+
+        Returns:
+            Tuple of (generation_time_sec, playback_time_sec).
+        """
+        wav_path, gen_time = self.synthesize(text)
+        play_time = self.play_wav(wav_path)
+        return gen_time, play_time

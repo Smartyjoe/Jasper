@@ -31,8 +31,10 @@ models/
 jasper_last_command.wav
 stt_test.wav
 
-# Local log files
+# Local log & database files
 *.log
+*.db
+jasper_memory.db
 
 # Backup and scratch scripts
 *.backup.py
