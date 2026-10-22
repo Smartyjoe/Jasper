@@ -28,13 +28,38 @@ _output_queue = queue.Queue()
 _playback_queue = queue.Queue()
 _bg_thread = None
 
+# Set while playback should be aborted (barge-in / interrupt).
+_stop_playback = threading.Event()
+
+
+def interrupt_playback() -> None:
+    """
+    Stop audio playback immediately and discard anything still queued.
+
+    The playback worker writes in small slices and checks this flag between
+    slices, so playback stops within ~20 ms instead of after the whole buffer.
+    """
+    _stop_playback.set()
+    while not _playback_queue.empty():
+        try:
+            _playback_queue.get_nowait()
+            _playback_queue.task_done()
+        except queue.Empty:
+            break
+    _stop_playback.clear()
+
 
 def _global_playback_worker():
     """
-    Background Audio Worker: Continually reads raw audio chunks from the queue 
+    Background Audio Worker: Continually reads raw audio chunks from the queue
     and sends them to PyAudio to play sound through your speakers with zero delay.
+
+    Audio is written in 20 ms slices so that `interrupt_playback()` can take
+    effect almost immediately. The stream-open failure is logged rather than
+    swallowed, so a dead worker can never make `_playback_queue.join()` hang.
     """
     pya = pyaudio.PyAudio()
+    SLICE = 480  # 20 ms @ 24 kHz, 16-bit mono
     try:
         stream = pya.open(
             format=FORMAT,
@@ -44,21 +69,25 @@ def _global_playback_worker():
             frames_per_buffer=1024
         )
         while True:
-            chunks = []
-            while not _playback_queue.empty():
-                try:
-                    chunks.append(_playback_queue.get_nowait())
-                except queue.Empty:
+            try:
+                chunk = _playback_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+
+            for i in range(0, len(chunk), SLICE):
+                if _stop_playback.is_set():
                     break
-            
-            if chunks:
-                stream.write(b"".join(chunks))
-                for _ in range(len(chunks)):
-                    _playback_queue.task_done()
-            else:
-                time.sleep(0.001)
-    except Exception:
-        pass
+                stream.write(chunk[i:i + SLICE])
+            _playback_queue.task_done()
+    except Exception as exc:
+        # Log rather than silently die: a dead worker turns every
+        # `_playback_queue.join()` into an infinite hang.
+        print(f"[ERROR] Playback worker stopped: {exc!r}", file=sys.stderr, flush=True)
+    finally:
+        try:
+            pya.terminate()
+        except Exception:
+            pass
 
 
 class AudioLoop:
@@ -84,8 +113,9 @@ class AudioLoop:
                         # Output text streaming
                         if response.server_content.output_transcription:
                             chunk_text = response.server_content.output_transcription.text
-                            sys.stdout.write(chunk_text)
-                            sys.stdout.flush()
+                            # Do not print streamed TTS transcription into the
+                            # STT/status console; it makes diagnostics look like
+                            # microphone input and obscures the state machine.
                             self.current_turn_text += chunk_text
                         
                         # Handle turn completion
@@ -178,10 +208,19 @@ def start_background_thread():
     loop.run_until_complete(background_async_loop())
 
 
-def TTS(query, voice="Zephyr"):
+def TTS(query, voice="Zephyr", timeout: float = 30.0):
     """
-    Text-To-Speech Interface: Prepares the prompt for repetition, sends it to 
-    the background thread, and clears live streaming output after execution.
+    Text-To-Speech Interface: Prepares the prompt for repetition and sends it to
+    the background thread.
+
+    The previous version ended by emitting ANSI escape sequences to erase the
+    streamed transcription from the terminal. That transcription is no longer
+    printed, so those escapes were wiping unrelated console output (the
+    "[JASPER]" lines, the "Jasper:" replies and everything below the cursor).
+    They have been removed.
+
+    A timeout is applied to the result wait: if the Live session drops, the
+    call used to block forever.
     """
     formatted_query = f"Repeat the following text exactly. Output nothing else:\n{query}"
 
@@ -191,17 +230,14 @@ def TTS(query, voice="Zephyr"):
         _bg_thread.start()
         while _main_loop is None or _input_queue is None:
             time.sleep(0.01)
-        
+
     _main_loop.call_soon_threadsafe(_input_queue.put_nowait, (formatted_query, voice))
-    final_response = _output_queue.get()
-    
-    if final_response:
-        lines_to_clear = len(final_response.splitlines()) if final_response else 1
-        sys.stdout.write("\r\033[K")
-        for _ in range(lines_to_clear - 1):
-            sys.stdout.write("\033[A\033[K")
-        sys.stdout.write("\r\033[J")
-        sys.stdout.flush()
+    try:
+        final_response = _output_queue.get(timeout=timeout)
+    except queue.Empty:
+        print(f"[ERROR] TTS timed out after {timeout}s", file=sys.stderr, flush=True)
+        interrupt_playback()
+        return ""
 
     return final_response
 

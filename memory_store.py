@@ -83,9 +83,27 @@ class MemoryStore:
         """Redact potential API keys, passwords, or credentials before saving."""
         if not text:
             return text
-        # Redact patterns like sk-..., Bearer ..., key-..., passwords
-        redacted = re.sub(r"(?:sk-[a-zA-Z0-9_]{16,}|bearer\s+[a-zA-Z0-9_\-\.]{16,}|password\s*=\s*\S+)", "[REDACTED_SECRET]", text, flags=re.IGNORECASE)
-        return redacted
+
+        # Well-known provider key shapes.
+        text = re.sub(
+            r"(?:sk-[a-zA-Z0-9_]{16,}|AIza[0-9A-Za-z_\-]{20,}|"
+            r"gh[pousr]_[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]{10,})",
+            "[REDACTED_SECRET]", text)
+
+        # key = value / key: value pairs for secret-looking names.
+        text = re.sub(
+            r"(?i)\b([a-z0-9_\-]*(?:api[_\-]?key|secret|token|password|passwd|"
+            r"pwd|credential|access[_\-]?key|private[_\-]?key)[a-z0-9_\-]*)"
+            r"(\s*[:=]\s*)"
+            r"(\"[^\"\n]{4,}\"|'[^'\n]{4,}'|[^\s,;\"'\n]{4,})",
+            r"\1\2[REDACTED_SECRET]", text)
+
+        # Authorization headers.
+        text = re.sub(
+            r"(?i)\bbearer\s+[a-zA-Z0-9_\-\.]{12,}",
+            "bearer [REDACTED_SECRET]", text)
+
+        return text
 
     def add_turn(
         self,
