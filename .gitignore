@@ -1,0 +1,59 @@
+# Python virtual environments
+.venv/
+.venv*/
+venv/
+env/
+ENV/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local AI Models & weights (large binaries)
+models/
+*.bin
+*.onnx
+*.safetensors
+*.pt
+*.pth
+
+# Audio recording test artifacts
+*.wav
+*.mp3
+*.pcm
+*.flac
+*.ogg
+jasper_last_command.wav
+stt_test.wav
+
+# Local log files
+*.log
+
+# Backup and scratch scripts
+*.backup.py
+*.before-*.py
+*.bak
+*~
+scratch/
+tmp/
+
+# Secrets and environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE and Editor configurations
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Operating System files
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
