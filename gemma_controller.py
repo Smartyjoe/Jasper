@@ -67,6 +67,16 @@ class GemmaController:
                 "final_style": "concise",
             }
 
+        if re.search(r"\b(thank you|thanks|you're welcome|appreciate it)\b", q):
+            return {
+                "route": "answer",
+                "action": None,
+                "answer_text": "You're welcome, sir.",
+                "spoken_ack": "",
+                "needs_progress": False,
+                "final_style": "concise",
+            }
+
         if re.search(r"\b(what can you do|help me|capabilities)\b", q):
             return {
                 "route": "answer",
@@ -236,11 +246,12 @@ Schema:
         except Exception as exc:
             print(f"[WARN] Gemma LLM routing failed or timed out ({exc}). Falling back to Hermes.", file=sys.stderr)
             return {
-                "route": "hermes",
+                "route": "clarify",
                 "action": None,
                 "arguments": {},
-                "needs_progress": True,
-                "spoken_ack": "Sending your request to Hermes.",
+                "needs_progress": False,
+                "spoken_ack": "",
+                "answer_text": "I need a moment to understand that request. Please say it another way, sir.",
                 "final_style": "concise",
-                "classified_by": "fallback_hermes",
+                "classified_by": "gemma_timeout",
             }

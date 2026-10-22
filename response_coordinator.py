@@ -8,12 +8,13 @@ from timing_tracker import RequestMetrics
 
 
 class ResponseCoordinator:
-    """Coordinates immediate acknowledgements, progress updates, and final responses with async TTS."""
+    """Coordinates immediate acknowledgements, progress updates, and final responses with async TTS and UI state notifications."""
 
     PROGRESS_THRESHOLD = 4.0  # Seconds before emitting progress update
 
-    def __init__(self, kokoro_voice: Optional[KokoroVoice] = None):
+    def __init__(self, kokoro_voice: Optional[KokoroVoice] = None, ui_queue: Optional[queue.Queue] = None):
         self.voice = kokoro_voice or KokoroVoice()
+        self.ui_queue = ui_queue
         self.speech_queue = queue.Queue()
         self._stop_event = threading.Event()
         self.worker_thread = threading.Thread(target=self._speech_worker, daemon=True)
@@ -33,7 +34,6 @@ class ResponseCoordinator:
             text, msg_type, metrics = item
 
             try:
-                # Mark synthesis start
                 if metrics:
                     metrics.mark("tts_gen_start")
 
@@ -44,12 +44,20 @@ class ResponseCoordinator:
                     metrics.record_duration(f"tts_synthesis_{msg_type}", gen_time)
                     metrics.mark("playback_start")
 
+                # Notify UI of speaking state
+                if self.ui_queue:
+                    self.ui_queue.put(("speaking", text[:32]))
+
                 # Play audio
                 play_time = self.voice.play_wav(wav_path)
 
                 if metrics:
                     metrics.mark("playback_end")
                     metrics.record_duration(f"tts_playback_{msg_type}", play_time)
+
+                # Return UI to idle or current status
+                if self.ui_queue and self.speech_queue.empty():
+                    self.ui_queue.put(("idle", "Say 'Hey Jasper'"))
 
             except KokoroVoiceError as kve:
                 print(f"[WARN] ResponseCoordinator TTS error ({msg_type}): {kve}", file=sys.stderr)
@@ -83,6 +91,8 @@ class ResponseCoordinator:
                 except queue.Empty:
                     break
             self.voice.stop_playback()
+            if self.ui_queue:
+                self.ui_queue.put(("idle", "Say 'Hey Jasper'"))
         except Exception as exc:
             print(f"[WARN] Failed to cancel pending speech: {exc}", file=sys.stderr)
 

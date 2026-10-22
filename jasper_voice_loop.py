@@ -19,6 +19,7 @@ from hermes_worker import HermesWorker
 from opencode_worker import OpenCodeWorker
 from kokoro_voice import KokoroVoice
 from response_coordinator import ResponseCoordinator
+from jasper_ui import start_ui_thread
 
 
 # ---------------- CONFIGURATION ----------------
@@ -35,6 +36,8 @@ PREROLL_BLOCKS = 8                 # ~400ms pre-roll to preserve first syllable
 WHISPER_MODEL_NAME = os.getenv("JASPER_WHISPER_MODEL", "small.en")
 
 audio_queue = queue.Queue(maxsize=300)
+ui_queue = queue.Queue()
+
 whisper_model = None
 gemma_controller = None
 action_engine = None
@@ -94,6 +97,8 @@ def audio_level(chunk: bytes) -> float:
 def capture_command(initial_chunks=None):
     """Capture spoken command with pre-roll and silence detection."""
     print("\nJasper is listening. Speak your command now.")
+    if ui_queue:
+        ui_queue.put(("listening", "Listening for command..."))
 
     preroll_buffer = deque(maxlen=PREROLL_BLOCKS)
     if initial_chunks:
@@ -111,6 +116,8 @@ def capture_command(initial_chunks=None):
 
         if not speech_started and elapsed >= COMMAND_TIMEOUT:
             print("[INFO] No speech detected within timeout. Returning to wake-word listener.")
+            if ui_queue:
+                ui_queue.put(("idle", "Say 'Hey Jasper'"))
             return None
 
         if elapsed >= MAX_COMMAND_SECONDS:
@@ -143,6 +150,8 @@ def capture_command(initial_chunks=None):
 
     if not speech_started or not chunks:
         print("[INFO] No command audio captured.")
+        if ui_queue:
+            ui_queue.put(("idle", "Say 'Hey Jasper'"))
         return None
 
     raw_audio = b"".join(chunks)
@@ -180,12 +189,15 @@ def strip_wake_phrase(text: str) -> str:
 
 
 def process_voice_request(audio):
-    """V1.2 Request Processor: STT -> Gemma Routing -> Action Engine / Hermes -> Response Coordinator."""
+    """V1.2 Request Processor: STT -> Gemma Routing -> Action Engine / Hermes -> Response Coordinator -> UI."""
     global whisper_model, gemma_controller, action_engine, memory_store
-    global hermes_worker, opencode_worker, response_coordinator
+    global hermes_worker, opencode_worker, response_coordinator, ui_queue
 
     metrics = RequestMetrics()
     metrics.mark("stt_start")
+
+    if ui_queue:
+        ui_queue.put(("processing", "Transcribing audio..."))
 
     try:
         if whisper_model is None:
@@ -214,9 +226,14 @@ def process_voice_request(audio):
 
         if not command_text:
             print("[INFO] Empty command text. Returning to listening.")
+            if ui_queue:
+                ui_queue.put(("idle", "Say 'Hey Jasper'"))
             metrics.mark("request_complete")
             metrics.print_summary()
             return
+
+        if ui_queue:
+            ui_queue.put(("processing", f"Heard: {command_text[:28]}"))
 
         # Fast Intent Classification & Routing via Gemma Controller
         metrics.mark("routing_start")
@@ -297,15 +314,22 @@ def process_voice_request(audio):
     except Exception as exc:
         print(f"[ERROR] Request processing failed: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
+        if ui_queue:
+            ui_queue.put(("idle", "Say 'Hey Jasper'"))
 
 
 # ---------------- MAIN LOOP ----------------
 
 def main():
-    print(f"Loading local Faster-Whisper {WHISPER_MODEL_NAME} model...")
-    global whisper_model, gemma_controller, action_engine, memory_store
+    global ui_queue, whisper_model, gemma_controller, action_engine, memory_store
     global hermes_worker, opencode_worker, kokoro_voice, response_coordinator
 
+    print("Initializing Jasper UI Overlay Thread...")
+    start_ui_thread(ui_queue)
+    if ui_queue:
+        ui_queue.put(("idle", "Say 'Hey Jasper'"))
+
+    print(f"Loading local Faster-Whisper {WHISPER_MODEL_NAME} model...")
     try:
         whisper_model = WhisperModel(WHISPER_MODEL_NAME, device="cpu", compute_type="int8", cpu_threads=4)
     except Exception as exc:
@@ -330,7 +354,7 @@ def main():
     print("Initializing Kokoro voice & Response Coordinator...")
     try:
         kokoro_voice = KokoroVoice(voice="am_fenrir", speed=1.0)
-        response_coordinator = ResponseCoordinator(kokoro_voice=kokoro_voice)
+        response_coordinator = ResponseCoordinator(kokoro_voice=kokoro_voice, ui_queue=ui_queue)
         print("Response Coordinator ready.")
     except Exception as exc:
         print(f"[WARN] Kokoro voice could not be initialized: {exc}", file=sys.stderr)
@@ -393,6 +417,9 @@ def main():
 
                 if wake_detected:
                     print("\nWake phrase detected!")
+                    if ui_queue:
+                        ui_queue.put(("listening", "Listening for command..."))
+
                     recognizer.Reset()
                     recent_chunks = list(wake_preroll)
                     wake_preroll.clear()
@@ -409,10 +436,14 @@ def main():
                             wake_preroll.clear()
                             recognizer.Reset()
                             is_processing = False
+                            if ui_queue:
+                                ui_queue.put(("idle", "Say 'Hey Jasper'"))
                     else:
                         clear_audio_queue()
                         wake_preroll.clear()
                         recognizer.Reset()
+                        if ui_queue:
+                            ui_queue.put(("idle", "Say 'Hey Jasper'"))
 
     except KeyboardInterrupt:
         print("\nJasper stopped safely.")
