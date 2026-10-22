@@ -14,6 +14,8 @@ from faster_whisper import WhisperModel
 from vosk import Model, KaldiRecognizer
 
 from transcript_enhancer import TranscriptEnhancer, discover_model_id
+from hermes_adapter import HermesAdapter, HermesError
+from kokoro_voice import KokoroVoice, KokoroVoiceError
 
 
 # ---------------- CONFIGURATION ----------------
@@ -40,6 +42,10 @@ audio_queue = queue.Queue(maxsize=300)
 whisper_model = None
 transcript_enhancer = None
 is_processing = False
+
+# Hermes brain adapter
+hermes_adapter = None
+kokoro_voice = None
 
 
 # ---------------- MICROPHONE ----------------
@@ -232,6 +238,9 @@ def transcribe_command(audio):
         print(f"\nJasper heard (raw): {command_text or '[No speech recognized]'}")
         print(f"[DEBUG] STT latency: {latency:.2f}s")
 
+        corrected = command_text
+        intent = ""
+
         if command_text and ENABLE_TRANSCRIPT_INTELLIGENCE and transcript_enhancer:
             try:
                 enh_start = time.monotonic()
@@ -252,6 +261,37 @@ def transcribe_command(audio):
                 print(f"[DEBUG] Intelligence latency: {enh_latency:.2f}s")
             except Exception as enh_err:
                 print(f"[WARN] Transcript intelligence error: {enh_err}", file=sys.stderr)
+
+        # -- Hermes reasoning --
+        final_query = corrected if corrected else command_text
+        hermes_answer = None
+
+        if hermes_adapter and final_query:
+            try:
+                print(f"[DEBUG] Sending to Hermes: {final_query!r}")
+                hermes_start = time.monotonic()
+                hermes_answer = hermes_adapter.ask(final_query)
+                print(f"Jasper: {hermes_answer}")
+                print(f"[DEBUG] Hermes latency: {time.monotonic() - hermes_start:.2f}s")
+            except HermesError as herr:
+                print(f"[WARN] Hermes failed: {herr}", file=sys.stderr)
+                hermes_answer = "Sorry, I couldn't reach my brain right now."
+            except Exception as exc:
+                print(f"[ERROR] Unexpected Hermes error: {exc}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                hermes_answer = "Sorry, something went wrong."
+
+        # -- Kokoro TTS --
+        if kokoro_voice and hermes_answer:
+            try:
+                tts_start = time.monotonic()
+                kokoro_voice.speak(hermes_answer)
+                print(f"[DEBUG] TTS latency: {time.monotonic() - tts_start:.2f}s")
+            except KokoroVoiceError as kve:
+                print(f"[WARN] Kokoro TTS failed: {kve}", file=sys.stderr)
+            except Exception as exc:
+                print(f"[ERROR] Unexpected TTS error: {exc}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
 
         print("Ready for the next wake phrase.\n")
 
@@ -292,6 +332,21 @@ def main():
                 print("[INFO] No Qwen model found on Ollama; enhancement will fall back to raw STT.")
         except Exception as exc:
             print(f"[WARN] Could not connect to Ollama: {exc}", file=sys.stderr)
+
+    global hermes_adapter, kokoro_voice
+    print("Initializing Hermes brain adapter...")
+    try:
+        hermes_adapter = HermesAdapter(timeout=30.0)
+        print("Hermes adapter ready.")
+    except Exception as exc:
+        print(f"[WARN] Hermes adapter could not be initialized: {exc}", file=sys.stderr)
+
+    print("Initializing Kokoro voice...")
+    try:
+        kokoro_voice = KokoroVoice(voice="am_fenrir", speed=1.0)
+        print("Kokoro voice ready.")
+    except Exception as exc:
+        print(f"[WARN] Kokoro voice could not be initialized: {exc}", file=sys.stderr)
 
     print("Loading Vosk wake-word model...")
     try:
