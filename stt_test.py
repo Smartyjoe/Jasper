@@ -5,7 +5,7 @@ import sounddevice as sd
 from faster_whisper import WhisperModel
 
 AUDIO_FILE = "stt_test.wav"
-MICROPHONE_DEVICE = 1
+MICROPHONE_DEVICE = 1   
 RECORD_SECONDS = 6
 
 def main():

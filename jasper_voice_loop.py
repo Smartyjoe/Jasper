@@ -1,4 +1,5 @@
 import json
+import os
 import queue
 import re
 import sys
@@ -26,7 +27,9 @@ SILENCE_SECONDS = 1.2              # Silence pause after speech to end command
 COMMAND_TIMEOUT = 5.0              # Max seconds to wait for initial speech
 MAX_COMMAND_SECONDS = 15.0         # Max command length
 PREROLL_BLOCKS = 8                 # ~400ms pre-roll to prevent cutting the first consonant
-WHISPER_MODEL_NAME = "base.en"     # High accuracy English-optimized model
+# `small.en` is a better CPU accuracy/speed tradeoff than `base.en`.
+# Use `medium.en` or `large-v3` when the machine can afford the latency/RAM.
+WHISPER_MODEL_NAME = os.getenv("JASPER_WHISPER_MODEL", "small.en")
 
 # Local Transcript Intelligence (Qwen via Ollama)
 ENABLE_TRANSCRIPT_INTELLIGENCE = True
@@ -159,11 +162,16 @@ def capture_command(initial_chunks=None):
         print(f"[WARN] Failed to write jasper_last_command.wav: {wav_err}", file=sys.stderr)
 
     audio = np.frombuffer(raw_audio, dtype=np.int16).astype(np.float32) / 32768.0
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
 
-    # Automatic peak gain normalization so quiet mic audio is clear for Whisper
-    peak = float(np.max(np.abs(audio))) if audio.size > 0 else 0.0
-    if 0.01 < peak < 0.6:
-        audio = audio * (0.65 / peak)
+    # Remove DC offset and apply only conservative gain. Peak-normalizing a
+    # quiet microphone also amplifies its room noise and hurts word accuracy.
+    if audio.size:
+        audio = audio - float(np.mean(audio))
+        rms = float(np.sqrt(np.mean(audio * audio)))
+        if 0.005 < rms < 0.08:
+            audio *= min(3.0, 0.08 / rms)
+        audio = np.clip(audio, -1.0, 1.0)
 
     duration = len(audio) / SAMPLE_RATE
     print(f"[DEBUG] Captured {duration:.2f}s of audio (peak {peak:.2f}) for transcription.")
@@ -179,7 +187,7 @@ def strip_wake_phrase(text: str) -> str:
 
 
 def transcribe_command(audio):
-    """Transcribe captured command using local Faster-Whisper base.en."""
+    """Transcribe captured command using the configured local Whisper model."""
     global whisper_model
 
     try:
@@ -195,16 +203,22 @@ def transcribe_command(audio):
         print("Transcribing locally...")
         start_t = time.monotonic()
 
-        # beam_size=5 + initial_prompt + condition_on_previous_text=False for optimal conversational accuracy
+        # Keep decoding independent between commands to prevent stale context
+        # from changing short utterances. VAD removes trailing room noise.
         segments, info = whisper_model.transcribe(
             audio,
             language="en",
             beam_size=5,
-            best_of=5,
             temperature=0.0,
             condition_on_previous_text=False,
-            initial_prompt="A conversation with an AI assistant named Jasper. Complete English sentences.",
-            vad_filter=False,
+            initial_prompt="Jasper, Ollama, speech-to-text, transcription.",
+            vad_filter=True,
+            vad_parameters={
+                "min_silence_duration_ms": 500,
+                "speech_pad_ms": 300,
+            },
+            no_speech_threshold=0.6,
+            log_prob_threshold=-1.0,
         )
 
         raw_transcript = " ".join(
